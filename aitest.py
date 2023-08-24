@@ -1,59 +1,82 @@
-  import torch
+import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.nn.utils.rnn import pad_sequence
+from collections import Counter
 
-# Data
-corpus = ["I like cats", "I like dogs", "Dogs and cats are great"]
-tokens = list(set(word for sentence in corpus for word in sentence.lower().split()))
-word_to_idx = {word: idx for idx, word in enumerate(tokens)}
+# Read the file
+with open('data.txt', 'r') as file:
+    corpus = file.read().splitlines()
+
+# Tokenize and build vocabulary
+tokens = [word for sentence in corpus for word in sentence.split()]
+vocab = Counter(tokens)
+vocab_size = len(vocab)
+word_to_idx = {word: idx for idx, word in enumerate(vocab)}
 idx_to_word = {idx: word for word, idx in word_to_idx.items()}
-tokenized_corpus = [[word_to_idx[word.lower()] for word in sentence.split()] for sentence in corpus]
 
-# Model definition
-class TinyLM(nn.Module):
-    def __init__(self, vocab_size, embedding_dim=10):
-        super(TinyLM, self).__init__()
-        self.embeddings = nn.Embedding(vocab_size, embedding_dim)
-        self.linear = nn.Linear(embedding_dim * 2, vocab_size)
-        self.activation_function = nn.LogSoftmax(dim=-1)
+# Prepare sequences for training
+sequences = [[word_to_idx[word] for word in sentence.split()] for sentence in corpus]
+sequences = [torch.tensor(seq, dtype=torch.long) for seq in sequences]
+padded_sequences = pad_sequence(sequences, batch_first=True)
 
-    def forward(self, inputs):
-        embeds = self.embeddings(inputs).view((1, -1))
-        out = self.linear(embeds)
-        log_probs = self.activation_function(out)
-        return log_probs
+# RNN Model Definition
+class ContextAwareRNN(nn.Module):
+    def __init__(self, vocab_size, embed_size, hidden_size):
+        super(ContextAwareRNN, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.rnn = nn.LSTM(embed_size, hidden_size, batch_first=True)
+        self.fc = nn.Linear(hidden_size, vocab_size)
+        self.log_softmax = nn.LogSoftmax(dim=-1)
 
-# Training data
-train_data = [(sentence[i:i+2], sentence[i+2]) for sentence in tokenized_corpus for i in range(len(sentence) - 2)]
+    def forward(self, inputs, hidden=None):
+        embeds = self.embedding(inputs)
+        output, hidden = self.rnn(embeds, hidden)
+        output = self.fc(output)
+        log_probs = self.log_softmax(output)
+        return log_probs, hidden
 
-# Model training
-model = TinyLM(len(tokens))
+# Hyperparameters
+embed_size = 64
+hidden_size = 128
+epochs = 10
+
+# Model, Loss, Optimizer
+model = ContextAwareRNN(vocab_size, embed_size, hidden_size)
 loss_function = nn.NLLLoss()
-optimizer = optim.SGD(model.parameters(), lr=0.1)
+optimizer = optim.Adam(model.parameters())
 
-for epoch in range(100):
-    total_loss = 0
-    for context, target in train_data:
-        context_tensor = torch.tensor(context, dtype=torch.long)
+# ... (same as previous code until the training loop)
+
+# Training loop with more epochs
+epochs = 30  # Increase the number of epochs for more training passes
+for epoch in range(epochs):
+    for sequence in padded_sequences:
+        inputs = sequence[:-1].unsqueeze(0)
+        targets = sequence[1:].unsqueeze(0)
         model.zero_grad()
-        log_probs = model(context_tensor)
-        loss = loss_function(log_probs, torch.tensor([target], dtype=torch.long))
+        log_probs, _ = model(inputs)
+        loss = loss_function(log_probs.squeeze(0), targets.squeeze(0))
         loss.backward()
         optimizer.step()
-        total_loss += loss.item()
 
-# Prediction function
-def predict_next_word(context):
+# Prediction Function to Generate Longer Texts
+def generate_text(context, length=10):
     with torch.no_grad():
-        context_words = [word.lower() for word in context.split() if word.lower() in word_to_idx]
-        if len(context_words) < 2:
-            return "Not enough known words in the input. Please enter two words from the corpus."
-        context_tensor = torch.tensor([word_to_idx[word] for word in context_words[:2]], dtype=torch.long)
-        log_probs = model(context_tensor)
-        prediction = torch.argmax(log_probs).item()
-        return idx_to_word[prediction]
+        generated_text = []
+        for _ in range(length):
+            context_tokens = [word_to_idx[word] for word in context.split()]
+            context_tensor = torch.tensor(context_tokens, dtype=torch.long).unsqueeze(0)
+            log_probs, _ = model(context_tensor)
+            prediction = torch.argmax(log_probs[0, -1]).item()
+            predicted_word = idx_to_word[prediction]
+            generated_text.append(predicted_word)
+            context += ' ' + predicted_word
+        return ' '.join(generated_text)
 
-# Accepting user input
-user_input = input('Please enter two words: ')
-print(f"Predicted next word: {predict_next_word(user_input)}")
-
+# Infinite Loop for User Input
+while True:
+    user_input = input("Please enter some words from the corpus (or 'exit' to quit): ")
+    if user_input.lower() == 'exit':
+        break
+    print(f"Generated text: {generate_text(user_input)}")
